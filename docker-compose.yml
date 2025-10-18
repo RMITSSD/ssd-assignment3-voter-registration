@@ -1,0 +1,61 @@
+# docker-compose.yml
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: voting_db
+      POSTGRES_USER: voting_user
+      POSTGRES_PASSWORD: voting_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voting_user -d voting_db -h localhost"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  # One-off job that applies migrations and seeds default users/candidates, then exits
+  migrate:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Inside containers the DB host is the service name "db"
+      DATABASE_URL: postgresql://voting_user:voting_password@db:5432/voting_db
+      FLASK_APP: app:create_app
+    command: >
+      sh -lc "set -e;
+      flask db upgrade;
+      python -c \"from app import create_app; from app.seed import seed; from app.extensions import db; 
+      app=create_app(); 
+      ctx=app.app_context(); ctx.push(); 
+      seed(); print('Seed complete'); 
+      ctx.pop()\""
+
+  web:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env   # loads SECRET_KEY, FLASK_APP (factory), etc.
+    environment:
+      # Override only the host part for container networking
+      DATABASE_URL: postgresql://voting_user:voting_password@db:5432/voting_db
+    volumes:
+      - ./:/app                               # hot-reload: edit locally, container picks up
+      - ./app/instance:/app/app/instance      # keep if you still store instance files
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
